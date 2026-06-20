@@ -61,7 +61,9 @@ export default function WorkspaceSettings() {
 
   useEffect(() => {
     fetchWorkspaceSettings();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router]);
+
 
   const handleSaveWorkspaceName = async () => {
     if (!editName.trim() || editName === workspace?.name) return;

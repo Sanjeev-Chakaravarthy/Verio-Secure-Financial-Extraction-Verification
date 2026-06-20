@@ -85,7 +85,7 @@ function RegisterForm() {
         toast.success("Account created! Joining your workspace...");
         router.push("/login?invite=1");
       } else {
-        const { confirmPassword: _, ...submitData } = data;
+        const { confirmPassword: _cp, ...submitData } = data; // eslint-disable-line @typescript-eslint/no-unused-vars
         const res = await fetch("/api/register", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -131,7 +131,7 @@ function RegisterForm() {
           {isInvited ? (
             <>
               <h1 className="font-serif text-white mb-md leading-snug text-[28px]">
-                You've been invited to join a workspace on Verio.
+                You&apos;ve been invited to join a workspace on Verio.
               </h1>
               <p className="font-sans text-zinc-400 leading-relaxed text-[15px]">
                 Create your account below or continue with Google. Your membership will be linked automatically once you sign in.

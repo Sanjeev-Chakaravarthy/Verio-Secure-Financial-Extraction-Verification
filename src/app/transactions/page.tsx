@@ -35,7 +35,9 @@ export default function Transactions() {
         fetchTransactions();
       }
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router, search, categoryFilter]);
+
 
   const fetchTransactions = (loadMore = false) => {
     if (loadMore) {

@@ -163,7 +163,6 @@ export default function Members() {
   };
 
   const isOwner = currentUserRole === "Owner";
-  const totalCount = members.length + pendingInvites.length;
 
   const getInitials = (name: string) =>
     name
