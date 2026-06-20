@@ -45,15 +45,41 @@ export default function Dashboard() {
   const [latestParsed, setLatestParsed] = useState<Transaction | null>(null);
   const [memberInitials, setMemberInitials] = useState<string[]>([]);
 
-  // Verify auth session on load
+  // Verify auth + workspace on load — redirect immediately if no workspace
   useEffect(() => {
-    authClient.getSession().then((res) => {
+    authClient.getSession().then(async (res) => {
       if (!res.data?.session) {
         router.push("/login");
-      } else {
-        fetchStats();
+        return;
       }
+      // Check workspace membership immediately
+      const wsRes = await fetch("/api/workspace/stats");
+      if (wsRes.status === 401) {
+        // No workspace — try accept pending invite first
+        const inviteRes = await fetch("/api/workspace/accept-invite", { method: "POST" });
+        const inviteData = await inviteRes.json();
+        if (inviteData.joined) {
+          window.location.reload();
+        } else {
+          router.replace("/complete-setup");
+        }
+        return;
+      }
+      // Has workspace — load stats
+      const data = await wsRes.json();
+      if (data && !data.error) {
+        setStats({
+          workspaceName: data.workspaceName,
+          membersCount: data.membersCount,
+          parsedCount: data.parsedCount,
+          lastActivity: data.lastActivity
+            ? new Date(data.lastActivity).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+            : "Never",
+        });
+      }
+      fetchMembers();
     });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router]);
 
   const fetchStats = () => {
@@ -72,7 +98,9 @@ export default function Dashboard() {
         }
       })
       .catch(() => {});
+  };
 
+  const fetchMembers = () => {
     fetch("/api/workspace/members")
       .then((res) => res.json())
       .then((data) => {
@@ -91,6 +119,7 @@ export default function Dashboard() {
       })
       .catch(() => {});
   };
+
 
   const handleParse = async () => {
     if (!inputText.trim()) return;
