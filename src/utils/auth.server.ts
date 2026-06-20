@@ -9,9 +9,9 @@ export const auth = betterAuth({
   baseURL: process.env.BETTER_AUTH_URL || "http://localhost:3000",
   trustedOrigins: [
     "http://localhost:3000",
-    "https://verio-secure-financial-extraction-verification-pbnwevu66.vercel.app",
-    "https://verio-secure-financi-git-27e92e-sanjeev-chakaravarthys-projects.vercel.app",
-    "https://verio-secure-financial-extraction-verification-4ksnart9o.vercel.app",
+    // Vercel automatically sets VERCEL_URL to the current deployment domain (no https://)
+    ...(process.env.VERCEL_URL ? [`https://${process.env.VERCEL_URL}`] : []),
+    // Also trust the canonical production URL from BETTER_AUTH_URL
     ...(process.env.BETTER_AUTH_URL ? [process.env.BETTER_AUTH_URL] : []),
   ],
   rateLimit: {
