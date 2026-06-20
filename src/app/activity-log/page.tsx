@@ -22,22 +22,23 @@ export default function ActivityLog() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    authClient.getSession().then((res) => {
-      if (!res.data?.session) {
-        router.push("/login");
-      } else {
-        fetch("/api/workspace/activity")
-          .then((res) => res.json())
-          .then((data) => {
-            if (data.logs) {
-              setLogs(data.logs);
-            }
-          })
-          .catch((err) => console.error("Error loading activity logs:", err))
-          .finally(() => setLoading(false));
-      }
-    });
+    // Run session check and data fetch in parallel
+    Promise.all([
+      authClient.getSession(),
+      fetch("/api/workspace/activity").then((r) => r.json()),
+    ])
+      .then(([sessionRes, data]) => {
+        if (!sessionRes.data?.session) {
+          router.push("/login");
+          return;
+        }
+        if (data.logs) setLogs(data.logs);
+      })
+      .catch((err) => console.error("Error loading activity logs:", err))
+      .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [router]);
+
 
   return (
     <div className="flex min-h-screen bg-background">
