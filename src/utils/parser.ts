@@ -100,9 +100,16 @@ export function parseRawTransactionText(text: string) {
     }
   }
 
-  if (foundAmount && amount > 0 && !isCredit && (normalized.includes("debit") || normalized.includes("debited") || normalized.includes("paid") || normalized.includes("charged"))) {
+  if (foundAmount && amount > 0 && !isCredit && (
+    normalized.includes("debit") ||
+    normalized.includes("debited") ||
+    normalized.includes("paid") ||
+    normalized.includes("charged") ||
+    /\bdr\b/.test(normalized)           // "Dr" = Debit in banking (e.g. "₹2,999.00 Dr")
+  )) {
     amount = -amount;
   }
+
 
   let category = "Miscellaneous";
   if (normalized.includes("coffee") || normalized.includes("starbucks") || normalized.includes("swiggy") || normalized.includes("zomato") || normalized.includes("food") || normalized.includes("restaurant") || normalized.includes("cafe")) {
