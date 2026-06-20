@@ -2,12 +2,10 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   eslint: {
-    // Warnings do not fail the production build
-    ignoreDuringBuilds: false,
-    dirs: ["src"],
+    // ESLint runs in CI separately — don't block the production build
+    ignoreDuringBuilds: true,
   },
   typescript: {
-    // Type errors are caught in CI separately
     ignoreBuildErrors: false,
   },
 };
