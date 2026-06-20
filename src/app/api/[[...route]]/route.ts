@@ -34,6 +34,16 @@ async function getSessionContext(headers: Headers) {
 
 import { parseRawTransactionText } from "@/utils/parser";
 
+// Debug endpoint — shows exactly what URL Better Auth is using (remove after fix)
+app.get("/debug-config", (c) => {
+  return c.json({
+    BETTER_AUTH_URL: process.env.BETTER_AUTH_URL || "NOT SET",
+    VERCEL_URL: process.env.VERCEL_URL || "NOT SET",
+    VERCEL_PROJECT_PRODUCTION_URL: process.env.VERCEL_PROJECT_PRODUCTION_URL || "NOT SET",
+    google_redirect_uri: `${process.env.BETTER_AUTH_URL || (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : `https://${process.env.VERCEL_URL}`)}/api/auth/callback/google`,
+  });
+});
+
 // Organization & Account Registration API
 app.post("/register", async (c) => {
   const { fullName, email, orgName, password, inviteOrg } = await c.req.json();
