@@ -174,8 +174,9 @@ function RegisterForm() {
             </h2>
             <p className="font-sans text-on-surface-variant text-[14px] text-zinc-500">
               {isInvited
-                ? `You've been invited. Create an account to get started.`
+                ? "You\u2019ve been invited. Create an account to get started."
                 : "Set up an isolated workspace for your team."}
+
             </p>
           </div>
 
