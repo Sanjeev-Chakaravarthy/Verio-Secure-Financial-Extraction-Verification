@@ -39,3 +39,15 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Scratch / temp files
+scratch/
+create_auth_seed.js
+"package 2.json"
+"tsconfig 2.json"
+postcss.config.js.old
+vite.config.ts
+
+# Old app backup
+old-remix-app/
+next-env.d.ts

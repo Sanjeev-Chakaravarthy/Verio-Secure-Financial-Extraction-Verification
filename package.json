@@ -1,27 +1,45 @@
 {
-  "name": "vessify-temp",
+  "name": "verio-temp",
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "dev": "next dev --turbopack",
-    "build": "next build --turbopack",
+    "dev": "next dev",
+    "build": "next build",
     "start": "next start",
     "lint": "eslint"
   },
   "dependencies": {
+    "@hookform/resolvers": "^5.4.0",
+    "@prisma/client": "^5.19.1",
+    "@types/nodemailer": "^8.0.1",
+    "better-auth": "^1.6.19",
+    "clsx": "^2.1.1",
+    "hono": "^4.12.26",
+    "next": "15.5.19",
+    "nodemailer": "^9.0.1",
     "react": "19.1.0",
     "react-dom": "19.1.0",
-    "next": "15.5.19"
+    "react-hook-form": "^7.79.0",
+    "resend": "^6.14.0",
+    "sonner": "^2.0.7",
+    "tailwind-merge": "^3.6.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
-    "typescript": "^5",
+    "@eslint/eslintrc": "^3",
+    "@tailwindcss/postcss": "^4",
+    "@types/jest": "^30.0.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
-    "@tailwindcss/postcss": "^4",
-    "tailwindcss": "^4",
     "eslint": "^9",
     "eslint-config-next": "15.5.19",
-    "@eslint/eslintrc": "^3"
+    "jest": "^30.4.2",
+    "node-mocks-http": "^1.17.2",
+    "prisma": "^5.19.1",
+    "puppeteer-core": "^24.43.1",
+    "tailwindcss": "^4",
+    "ts-jest": "^29.4.11",
+    "typescript": "^5"
   }
 }
