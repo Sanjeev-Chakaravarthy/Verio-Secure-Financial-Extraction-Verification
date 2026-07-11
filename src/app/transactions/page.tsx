@@ -108,7 +108,7 @@ export default function Transactions() {
                 <select
                   value={categoryFilter}
                   onChange={(e) => setCategoryFilter(e.target.value)}
-                  className="bg-surface-container-low border border-outline-variant px-md py-sm font-sans text-label-sm text-[12px] text-primary focus:outline-none focus:ring-0 focus:border-primary rounded-none"
+                  className="bg-surface-container-low border border-outline-variant pl-md pr-10 py-sm font-sans text-label-sm text-[12px] text-primary focus:outline-none focus:ring-0 focus:border-primary rounded-none appearance-none bg-[url('data:image/svg+xml;charset=UTF-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2012%2012%22%3E%3Cpath%20fill%3D%22%23555%22%20d%3D%22M2%204l4%204%204-4%22%2F%3E%3C%2Fsvg%3E')] bg-[length:12px] bg-[right_12px_center] bg-no-repeat cursor-pointer"
                 >
                   <option value="">All Categories</option>
                   <option value="Food & Beverage">Food & Beverage</option>
