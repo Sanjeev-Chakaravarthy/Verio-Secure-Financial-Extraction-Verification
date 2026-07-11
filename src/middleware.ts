@@ -1,32 +1,29 @@
 import { NextRequest, NextResponse } from "next/server";
+import { PUBLIC_ROUTES, SESSION_COOKIE_NAMES } from "@/lib/constants";
 
-// Public routes that don't need auth
-const PUBLIC_ROUTES = [
-  "/login",
-  "/register",
-  "/forgot-password",
-  "/reset-password",
-  "/how-it-works",
-  "/api/auth",
-  "/api/register",
-  "/api/debug-config",
-  "/_next",
-  "/favicon",
-];
-
+/**
+ * Next.js Edge Middleware — UI-level redirect guard.
+ *
+ * This is NOT a security boundary. It provides UX convenience by redirecting
+ * unauthenticated browsers away from protected pages. Actual authorization
+ * is enforced server-side in each API route handler via `getSessionContext()`.
+ *
+ * @see {@link file://src/app/api/[[...route]]/route.ts} for the authoritative
+ *   session check that protects every data endpoint.
+ */
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
-  // Allow public routes
+  // Allow public routes through without a session check
   const isPublic = PUBLIC_ROUTES.some((route) => pathname.startsWith(route));
   if (isPublic || pathname === "/") return NextResponse.next();
 
-  // Better Auth sets this cookie on login
-  const sessionToken =
-    request.cookies.get("better-auth.session_token") ||
-    request.cookies.get("__Secure-better-auth.session_token");
+  // Check for a Better Auth session cookie (set on successful login)
+  const hasSession = SESSION_COOKIE_NAMES.some(
+    (name) => request.cookies.has(name)
+  );
 
-  if (!sessionToken) {
+  if (!hasSession) {
     const loginUrl = new URL("/login", request.url);
     loginUrl.searchParams.set("from", pathname);
     return NextResponse.redirect(loginUrl);
