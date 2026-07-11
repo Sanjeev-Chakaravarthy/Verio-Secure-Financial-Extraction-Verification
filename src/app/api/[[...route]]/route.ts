@@ -1,26 +1,69 @@
 import { Hono } from "hono";
 import { handle } from "hono/vercel";
+import { getCookie, setCookie } from "hono/cookie";
 import { auth } from "@/utils/auth.server";
 import { prisma } from "@/utils/db.server";
 import { sendInviteEmail } from "@/utils/email";
+import { parseRawTransactionText } from "@/utils/parser";
+import {
+  ParseTransactionSchema,
+  RegisterSchema,
+  InviteSchema,
+  UpdateRoleSchema,
+  UpdateWorkspaceSchema,
+  CompleteSetupSchema,
+} from "@/lib/validations";
+import { INVITE_EXPIRY_DAYS, DEFAULT_PAGE_SIZE } from "@/lib/constants";
+import type { SessionContext } from "@/lib/types";
+
+/** Cookie name used to persist the user's active workspace selection. */
+const ACTIVE_WORKSPACE_COOKIE = "verio-active-workspace";
 
 const app = new Hono().basePath("/api");
 
-// Context helper to securely resolve organization workspace context from Better Auth session
-async function getSessionContext(headers: Headers) {
+// ────────────────────────────────────────────────────────────────
+// Session Context Resolution
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * Resolves the authenticated user's workspace context from the
+ * Better Auth session cookie attached to the incoming request.
+ *
+ * Returns `null` when:
+ * - No valid session token is present (unauthenticated).
+ * - The user has no workspace membership (onboarding incomplete).
+ *
+ * Every protected route calls this first and returns 401 on `null`.
+ *
+ * @param headers - Incoming request headers containing the session cookie.
+ * @returns The resolved workspace context, or `null` if unauthorized.
+ */
+async function getSessionContext(headers: Headers, cookieHeader?: string | null): Promise<SessionContext | null> {
   const session = await auth.api.getSession({ headers });
   if (!session || !session.user) {
     return null;
   }
-  
-  // Find organization membership for this user
-  const membership = await prisma.membership.findFirst({
+
+  // Fetch ALL memberships for this user
+  const memberships = await prisma.membership.findMany({
     where: { userId: session.user.id },
     include: { organization: true },
   });
 
-  if (!membership) {
+  if (memberships.length === 0) {
     return null;
+  }
+
+  // Check if the user has an active workspace cookie
+  let membership = memberships[0];
+  if (cookieHeader) {
+    const activeOrgId = parseCookieValue(cookieHeader, ACTIVE_WORKSPACE_COOKIE);
+    if (activeOrgId) {
+      const match = memberships.find((m) => m.organizationId === activeOrgId);
+      if (match) {
+        membership = match;
+      }
+    }
   }
 
   return {
@@ -32,26 +75,37 @@ async function getSessionContext(headers: Headers) {
   };
 }
 
-import { parseRawTransactionText } from "@/utils/parser";
+/**
+ * Extracts a cookie value from a raw Cookie header string.
+ * Avoids depending on Hono's context object so this can be called
+ * from the standalone `getSessionContext()` helper.
+ */
+function parseCookieValue(cookieHeader: string, name: string): string | null {
+  const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
+  return match ? decodeURIComponent(match[1]) : null;
+}
 
-// Debug endpoint — shows exactly what URL Better Auth is using (remove after fix)
-app.get("/debug-config", (c) => {
-  return c.json({
-    BETTER_AUTH_URL: process.env.BETTER_AUTH_URL || "NOT SET",
-    VERCEL_URL: process.env.VERCEL_URL || "NOT SET",
-    VERCEL_PROJECT_PRODUCTION_URL: process.env.VERCEL_PROJECT_PRODUCTION_URL || "NOT SET",
-    google_redirect_uri: `${process.env.BETTER_AUTH_URL || (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : `https://${process.env.VERCEL_URL}`)}/api/auth/callback/google`,
-  });
-});
+// ────────────────────────────────────────────────────────────────
+// Registration
+// ────────────────────────────────────────────────────────────────
 
-// Organization & Account Registration API
+/**
+ * POST /api/register
+ *
+ * Creates a new user account via Better Auth and optionally creates
+ * a new organization (normal flow) or joins an existing one (invite flow).
+ *
+ * Request body validated by {@link RegisterSchema}.
+ */
 app.post("/register", async (c) => {
-  const { fullName, email, orgName, password, inviteOrg } = await c.req.json();
+  const body = await c.req.json();
+  const parsed = RegisterSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: parsed.error.issues[0].message }, 400);
+  }
+  const { fullName, email, orgName, password, inviteOrg } = parsed.data;
   const isInvited = !!inviteOrg;
 
-  if (!email || !password || !fullName) {
-    return c.json({ error: "All fields are required" }, 400);
-  }
   if (!isInvited && !orgName) {
     return c.json({ error: "Organization name is required" }, 400);
   }
@@ -94,7 +148,7 @@ app.post("/register", async (c) => {
     }
 
     // Normal flow — create organization and bind as Owner
-    const organization = await prisma.organization.create({ data: { name: orgName } });
+    const organization = await prisma.organization.create({ data: { name: orgName! } });
 
     await prisma.membership.create({
       data: { organizationId: organization.id, userId: userSession.user.id, role: "Owner" },
@@ -105,7 +159,7 @@ app.post("/register", async (c) => {
         organizationId: organization.id,
         userId: userSession.user.id,
         eventName: "Workspace Created",
-        details: orgName,
+        details: orgName!,
       },
     });
 
@@ -116,50 +170,66 @@ app.post("/register", async (c) => {
   }
 });
 
+// ────────────────────────────────────────────────────────────────
+// Transaction Parsing
+// ────────────────────────────────────────────────────────────────
 
-// 1. Transaction Parsing API
+/**
+ * POST /api/transactions/parse
+ *
+ * Accepts raw financial text (bank SMS, statement line, etc.), runs
+ * the extraction parser, and atomically persists both the Transaction
+ * and its ParseResult in a single database transaction.
+ *
+ * Request body validated by {@link ParseTransactionSchema}.
+ */
 app.post("/transactions/parse", async (c) => {
-  const context = await getSessionContext(c.req.raw.headers);
+  const context = await getSessionContext(c.req.raw.headers, c.req.raw.headers.get("cookie"));
   if (!context) {
     return c.json({ error: "Unauthorized workspace context" }, 401);
   }
 
-  const { text } = await c.req.json();
-  if (!text || typeof text !== "string") {
-    return c.json({ error: "Input text is required" }, 400);
+  const body = await c.req.json();
+  const parsed = ParseTransactionSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: parsed.error.issues[0].message }, 400);
   }
+  const { text } = parsed.data;
 
   const parse = parseRawTransactionText(text);
 
-  // Create Transaction
-  const transaction = await prisma.transaction.create({
-    data: {
-      organizationId: context.organizationId,
-      date: parse.date,
-      description: parse.merchant,
-      amount: parse.amount,
-      category: parse.category,
-      rawText: text,
-    },
+  // Atomic write: transaction + parseResult succeed or fail together
+  const result = await prisma.$transaction(async (tx) => {
+    const transaction = await tx.transaction.create({
+      data: {
+        organizationId: context.organizationId,
+        date: parse.date,
+        description: parse.merchant,
+        amount: parse.amount,
+        category: parse.category,
+        rawText: text,
+      },
+    });
+
+    const parseResult = await tx.parseResult.create({
+      data: {
+        transactionId: transaction.id,
+        merchant: parse.merchant,
+        amount: parse.amount,
+        date: parse.date,
+        category: parse.category,
+        merchantMatch: parse.merchantMatch,
+        amountMatch: parse.amountMatch,
+        dateMatch: parse.dateMatch,
+        categoryMatch: parse.categoryMatch,
+        finalConfidenceScore: parse.finalConfidenceScore,
+      },
+    });
+
+    return { transaction, parseResult };
   });
 
-  // Create Parse Result
-  const parseResult = await prisma.parseResult.create({
-    data: {
-      transactionId: transaction.id,
-      merchant: parse.merchant,
-      amount: parse.amount,
-      date: parse.date,
-      category: parse.category,
-      merchantMatch: parse.merchantMatch,
-      amountMatch: parse.amountMatch,
-      dateMatch: parse.dateMatch,
-      categoryMatch: parse.categoryMatch,
-      finalConfidenceScore: parse.finalConfidenceScore,
-    },
-  });
-
-  // Log Activity
+  // Log activity (outside the transaction — non-critical)
   await prisma.auditLog.create({
     data: {
       organizationId: context.organizationId,
@@ -169,21 +239,32 @@ app.post("/transactions/parse", async (c) => {
     },
   });
 
-  return c.json({ transaction: { ...transaction, parseResult } });
+  return c.json({ transaction: { ...result.transaction, parseResult: result.parseResult } });
 });
 
-// 2. Fetch Transactions (Workspace Scoped with Pagination, Search, Filtering)
+// ────────────────────────────────────────────────────────────────
+// Transaction Queries
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/transactions
+ *
+ * Returns a cursor-paginated, filterable list of transactions
+ * scoped to the authenticated user's organization.
+ *
+ * Query params: `search`, `category`, `limit`, `cursor`.
+ */
 app.get("/transactions", async (c) => {
-  const context = await getSessionContext(c.req.raw.headers);
+  const context = await getSessionContext(c.req.raw.headers, c.req.raw.headers.get("cookie"));
   if (!context) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
   const search = c.req.query("search") || "";
   const category = c.req.query("category") || "";
-  const limit = parseInt(c.req.query("limit") || "10", 10);
+  const limit = parseInt(c.req.query("limit") || String(DEFAULT_PAGE_SIZE), 10);
   const cursor = c.req.query("cursor");
-  
+
   const transactions = await prisma.transaction.findMany({
     where: {
       organizationId: context.organizationId,
@@ -215,9 +296,14 @@ app.get("/transactions", async (c) => {
   return c.json({ transactions, nextCursor });
 });
 
-// 3. Fetch Transaction Detail (IDOR Scoped)
+/**
+ * GET /api/transactions/:id
+ *
+ * Returns a single transaction with its parse result, scoped
+ * to the authenticated user's organization (prevents IDOR).
+ */
 app.get("/transactions/:id", async (c) => {
-  const context = await getSessionContext(c.req.raw.headers);
+  const context = await getSessionContext(c.req.raw.headers, c.req.raw.headers.get("cookie"));
   if (!context) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -240,9 +326,17 @@ app.get("/transactions/:id", async (c) => {
   return c.json({ transaction });
 });
 
-// 4. Workspace Members API
+// ────────────────────────────────────────────────────────────────
+// Workspace Members
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/workspace/members
+ *
+ * Returns all active members of the authenticated user's organization.
+ */
 app.get("/workspace/members", async (c) => {
-  const context = await getSessionContext(c.req.raw.headers);
+  const context = await getSessionContext(c.req.raw.headers, c.req.raw.headers.get("cookie"));
   if (!context) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -264,9 +358,13 @@ app.get("/workspace/members", async (c) => {
   return c.json({ members });
 });
 
-// 4b. List Pending Invitations (Verification records with invite: prefix)
+/**
+ * GET /api/workspace/members/pending
+ *
+ * Returns all unexpired pending invitations for the organization.
+ */
 app.get("/workspace/members/pending", async (c) => {
-  const context = await getSessionContext(c.req.raw.headers);
+  const context = await getSessionContext(c.req.raw.headers, c.req.raw.headers.get("cookie"));
   if (!context) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -289,9 +387,13 @@ app.get("/workspace/members/pending", async (c) => {
   return c.json({ invites });
 });
 
-// 4c. Cancel Pending Invitation
+/**
+ * DELETE /api/workspace/members/invite/:id
+ *
+ * Cancels a pending invitation. Owner-only.
+ */
 app.delete("/workspace/members/invite/:id", async (c) => {
-  const context = await getSessionContext(c.req.raw.headers);
+  const context = await getSessionContext(c.req.raw.headers, c.req.raw.headers.get("cookie"));
   if (!context) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -322,9 +424,17 @@ app.delete("/workspace/members/invite/:id", async (c) => {
   return c.json({ success: true });
 });
 
-// 5. Invite Member — stores a pending invite token, does NOT pre-create stub users
+/**
+ * POST /api/workspace/members/invite
+ *
+ * Invites a user to the workspace by email. If the user already has
+ * an account, they are added immediately. Otherwise, a pending invite
+ * token is stored in the Verification table.
+ *
+ * Owner-only. Request body validated by {@link InviteSchema}.
+ */
 app.post("/workspace/members/invite", async (c) => {
-  const context = await getSessionContext(c.req.raw.headers);
+  const context = await getSessionContext(c.req.raw.headers, c.req.raw.headers.get("cookie"));
   if (!context) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -333,10 +443,12 @@ app.post("/workspace/members/invite", async (c) => {
     return c.json({ error: "Forbidden: Only Owners can invite members" }, 403);
   }
 
-  const { email } = await c.req.json();
-  if (!email) {
-    return c.json({ error: "Email is required" }, 400);
+  const body = await c.req.json();
+  const parsed = InviteSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: parsed.error.issues[0].message }, 400);
   }
+  const { email } = parsed.data;
 
   // If the user already exists in Better Auth (has a real Account), check for existing membership
   const existingUser = await prisma.user.findUnique({
@@ -389,9 +501,9 @@ app.post("/workspace/members/invite", async (c) => {
   }
 
   // Store a pending invite in the Verification table
-  // identifier = "invite:<orgId>:<email>", value = orgId, expires in 7 days
+  // identifier = "invite:<orgId>:<email>", value = orgId, expires in INVITE_EXPIRY_DAYS
   const inviteIdentifier = `invite:${context.organizationId}:${email}`;
-  const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+  const expiresAt = new Date(Date.now() + INVITE_EXPIRY_DAYS * 24 * 60 * 60 * 1000);
 
   // Upsert so re-inviting the same email refreshes the expiry
   const existing = await prisma.verification.findFirst({
@@ -434,7 +546,12 @@ app.post("/workspace/members/invite", async (c) => {
   return c.json({ success: true, message: "Invite sent. The user will join when they sign up or log in." });
 });
 
-// 5b. Accept Pending Invite — called after a user logs in/registers to claim their pending membership
+/**
+ * POST /api/workspace/accept-invite
+ *
+ * Called after a user logs in or registers to claim any pending
+ * workspace invitations addressed to their email.
+ */
 app.post("/workspace/accept-invite", async (c) => {
   const session = await auth.api.getSession({ headers: c.req.raw.headers });
   if (!session || !session.user) {
@@ -493,16 +610,18 @@ app.post("/workspace/accept-invite", async (c) => {
   return c.json({ joined: joined.length > 0, organizations: joined });
 });
 
-
-
-// 6. Delete Member (Authorization Protected)
+/**
+ * DELETE /api/workspace/members/:id
+ *
+ * Removes a member from the workspace. Owner-only.
+ * An owner cannot remove themselves.
+ */
 app.delete("/workspace/members/:id", async (c) => {
-  const context = await getSessionContext(c.req.raw.headers);
+  const context = await getSessionContext(c.req.raw.headers, c.req.raw.headers.get("cookie"));
   if (!context) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  // Only Owner can delete members
   if (context.role !== "Owner") {
     return c.json({ error: "Forbidden: Only Owners can remove members" }, 403);
   }
@@ -531,7 +650,6 @@ app.delete("/workspace/members/:id", async (c) => {
 
   await prisma.membership.delete({ where: { id } });
 
-  // Log Activity
   await prisma.auditLog.create({
     data: {
       organizationId: context.organizationId,
@@ -544,23 +662,29 @@ app.delete("/workspace/members/:id", async (c) => {
   return c.json({ success: true });
 });
 
-// 7. Update Member Role (Authorization Protected)
+/**
+ * PATCH /api/workspace/members/:id
+ *
+ * Updates a member's role. Owner-only.
+ * Request body validated by {@link UpdateRoleSchema}.
+ */
 app.patch("/workspace/members/:id", async (c) => {
-  const context = await getSessionContext(c.req.raw.headers);
+  const context = await getSessionContext(c.req.raw.headers, c.req.raw.headers.get("cookie"));
   if (!context) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  // Only Owner can change roles
   if (context.role !== "Owner") {
     return c.json({ error: "Forbidden: Only Owners can modify member roles" }, 403);
   }
 
   const id = c.req.param("id");
-  const { role } = await c.req.json();
-  if (role !== "Owner" && role !== "Member") {
-    return c.json({ error: "Invalid role specified" }, 400);
+  const body = await c.req.json();
+  const parsed = UpdateRoleSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: parsed.error.issues[0].message }, 400);
   }
+  const { role } = parsed.data;
 
   const membership = await prisma.membership.findFirst({
     where: {
@@ -581,7 +705,6 @@ app.patch("/workspace/members/:id", async (c) => {
     data: { role },
   });
 
-  // Log Activity
   await prisma.auditLog.create({
     data: {
       organizationId: context.organizationId,
@@ -594,9 +717,17 @@ app.patch("/workspace/members/:id", async (c) => {
   return c.json({ success: true });
 });
 
-// 8. Fetch Scoped Audit Logs
+// ────────────────────────────────────────────────────────────────
+// Workspace Activity & Stats
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/workspace/activity
+ *
+ * Returns the organization-scoped audit log, ordered newest first.
+ */
 app.get("/workspace/activity", async (c) => {
-  const context = await getSessionContext(c.req.raw.headers);
+  const context = await getSessionContext(c.req.raw.headers, c.req.raw.headers.get("cookie"));
   if (!context) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -616,9 +747,14 @@ app.get("/workspace/activity", async (c) => {
   return c.json({ logs });
 });
 
-// 9. Fetch Workspace Stats
+/**
+ * GET /api/workspace/stats
+ *
+ * Returns aggregate workspace statistics: member count, parsed
+ * transaction count, workspace name, and last activity timestamp.
+ */
 app.get("/workspace/stats", async (c) => {
-  const context = await getSessionContext(c.req.raw.headers);
+  const context = await getSessionContext(c.req.raw.headers, c.req.raw.headers.get("cookie"));
   if (!context) {
     return c.json({ error: "Unauthorized" }, 401);
   }
@@ -640,17 +776,30 @@ app.get("/workspace/stats", async (c) => {
   });
 });
 
-// 10. Complete Workspace Setup (Google Registration Onboarding)
+// ────────────────────────────────────────────────────────────────
+// Workspace Setup & Settings
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/workspace/complete-setup
+ *
+ * Called after Google OAuth sign-up to create the user's first
+ * organization and membership. Updates the user name if changed.
+ *
+ * Request body validated by {@link CompleteSetupSchema}.
+ */
 app.post("/workspace/complete-setup", async (c) => {
   const session = await auth.api.getSession({ headers: c.req.raw.headers });
   if (!session || !session.user) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  const { fullName, orgName } = await c.req.json();
-  if (!fullName || !orgName) {
-    return c.json({ error: "All fields are required" }, 400);
+  const body = await c.req.json();
+  const parsed = CompleteSetupSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: parsed.error.issues[0].message }, 400);
   }
+  const { fullName, orgName } = parsed.data;
 
   try {
     // 1. Update user name if changed
@@ -693,22 +842,28 @@ app.post("/workspace/complete-setup", async (c) => {
   }
 });
 
-// 11. Update Workspace Settings (Organization name)
+/**
+ * PATCH /api/workspace
+ *
+ * Updates the organization name. Owner-only.
+ * Request body validated by {@link UpdateWorkspaceSchema}.
+ */
 app.patch("/workspace", async (c) => {
-  const context = await getSessionContext(c.req.raw.headers);
+  const context = await getSessionContext(c.req.raw.headers, c.req.raw.headers.get("cookie"));
   if (!context) {
     return c.json({ error: "Unauthorized" }, 401);
   }
 
-  // Only Owner can modify organization settings
   if (context.role !== "Owner") {
     return c.json({ error: "Forbidden: Only Owners can edit workspace settings" }, 403);
   }
 
-  const { name } = await c.req.json();
-  if (!name || name.trim().length < 2) {
-    return c.json({ error: "Workspace name must be at least 2 characters" }, 400);
+  const body = await c.req.json();
+  const parsed = UpdateWorkspaceSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: parsed.error.issues[0].message }, 400);
   }
+  const { name } = parsed.data;
 
   try {
     const oldName = context.organizationName;
@@ -717,7 +872,6 @@ app.patch("/workspace", async (c) => {
       data: { name: name.trim() },
     });
 
-    // Log Activity
     await prisma.auditLog.create({
       data: {
         organizationId: context.organizationId,
@@ -732,6 +886,90 @@ app.patch("/workspace", async (c) => {
     return c.json({ error: err instanceof Error ? err.message : "Failed to update workspace" }, 400);
   }
 });
+
+// ────────────────────────────────────────────────────────────────
+// Multi-Workspace: List & Switch
+// ────────────────────────────────────────────────────────────────
+
+/**
+ * GET /api/workspace/list
+ *
+ * Returns all workspaces the authenticated user belongs to,
+ * along with which one is currently active.
+ */
+app.get("/workspace/list", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers });
+  if (!session || !session.user) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const memberships = await prisma.membership.findMany({
+    where: { userId: session.user.id },
+    include: { organization: true },
+  });
+
+  const activeOrgId = getCookie(c, ACTIVE_WORKSPACE_COOKIE) || memberships[0]?.organizationId;
+
+  const workspaces = memberships.map((m) => ({
+    id: m.organizationId,
+    name: m.organization.name,
+    role: m.role,
+    isActive: m.organizationId === activeOrgId,
+  }));
+
+  return c.json({ workspaces });
+});
+
+/**
+ * POST /api/workspace/switch
+ *
+ * Sets the active workspace for the authenticated user by writing
+ * a cookie. Validates that the user actually belongs to the target
+ * organization before setting it.
+ */
+app.post("/workspace/switch", async (c) => {
+  const session = await auth.api.getSession({ headers: c.req.raw.headers });
+  if (!session || !session.user) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const { organizationId } = await c.req.json();
+  if (!organizationId) {
+    return c.json({ error: "organizationId is required" }, 400);
+  }
+
+  // Verify the user is a member of this organization
+  const membership = await prisma.membership.findFirst({
+    where: { organizationId, userId: session.user.id },
+    include: { organization: true },
+  });
+
+  if (!membership) {
+    return c.json({ error: "You are not a member of this workspace" }, 403);
+  }
+
+  // Set the active workspace cookie (30 days, httpOnly, sameSite)
+  setCookie(c, ACTIVE_WORKSPACE_COOKIE, organizationId, {
+    path: "/",
+    httpOnly: false, // Frontend needs to read this for UX
+    sameSite: "Lax",
+    maxAge: 30 * 24 * 60 * 60,
+    secure: process.env.NODE_ENV === "production",
+  });
+
+  return c.json({
+    success: true,
+    workspace: {
+      id: membership.organizationId,
+      name: membership.organization.name,
+      role: membership.role,
+    },
+  });
+});
+
+// ────────────────────────────────────────────────────────────────
+// HTTP Method Exports (Next.js App Router convention)
+// ────────────────────────────────────────────────────────────────
 
 export const GET = handle(app);
 export const POST = handle(app);
