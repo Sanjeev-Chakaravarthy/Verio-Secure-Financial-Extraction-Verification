@@ -92,14 +92,14 @@ export default function CompleteSetup() {
   }
 
   return (
-    <main className="flex h-screen w-full overflow-hidden">
+    <main className="flex w-full h-screen overflow-hidden">
       {/* Left Side: Trust Panel */}
       <section className="hidden lg:flex lg:w-1/2 bg-[#121212] flex-col justify-between p-margin-page relative overflow-hidden">
         <div className="absolute top-1/4 left-[-10%] rotate-[-5deg] w-[120%] h-[1px] border border-white/5 pointer-events-none"></div>
         <div className="absolute left-1/3 top-[-10%] rotate-[2deg] w-[1px] h-[120%] border border-white/5 pointer-events-none"></div>
         <div className="absolute bottom-1/3 left-[-10%] rotate-[3deg] w-[120%] h-[1px] border border-white/5 pointer-events-none"></div>
 
-        <div className="z-10 flex flex-col gap-xl w-full">
+        <div className="z-10 flex flex-col w-full gap-xl">
           <Brand theme="dark" />
           <div className="w-full max-w-md mt-3xl">
             <h1 className="font-serif text-display-lg text-white mb-lg text-[48px] leading-[1.1] tracking-tight">
@@ -135,7 +135,7 @@ export default function CompleteSetup() {
 
           <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-xl">
             {/* Full Name */}
-            <div className="flex flex-col gap-base relative group">
+            <div className="relative flex flex-col gap-base group">
               <label className="font-sans text-label-sm text-[12px] text-on-surface-variant uppercase tracking-wider" htmlFor="fullName">
                 Full Name
               </label>
@@ -152,7 +152,7 @@ export default function CompleteSetup() {
             </div>
 
             {/* Organization Name */}
-            <div className="flex flex-col gap-base relative group">
+            <div className="relative flex flex-col gap-base group">
               <label className="font-sans text-label-sm text-[12px] text-on-surface-variant uppercase tracking-wider" htmlFor="orgName">
                 Workspace / Organization Name
               </label>
@@ -168,7 +168,7 @@ export default function CompleteSetup() {
               )}
             </div>
 
-            <div className="mt-md flex flex-col gap-md">
+            <div className="flex flex-col mt-md gap-md">
               <button
                 type="submit"
                 disabled={loading}
@@ -187,7 +187,7 @@ export default function CompleteSetup() {
             </div>
           </form>
 
-          <footer className="mt-3xl pt-xl border-t border-outline-variant">
+          <footer className="border-t mt-3xl pt-xl border-outline-variant">
             <div className="flex justify-between text-center max-w-[200px] mx-auto">
               <Link href="#" className="font-sans text-body-md text-[14px] text-on-surface-variant hover:text-primary transition-colors">
                 Privacy Policy
