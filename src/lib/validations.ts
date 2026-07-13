@@ -28,6 +28,48 @@ export const ParseTransactionSchema = z.object({
 
 export type ParseTransactionInput = z.infer<typeof ParseTransactionSchema>;
 
+/** Schema for PUT /api/transactions/:id/splits */
+export const TransactionSplitSchema = z
+  .object({
+    splits: z
+      .array(
+        z.object({
+          userId: z.string().min(1, "User is required"),
+          percentage: z
+            .number()
+            .positive("Split percentage must be greater than 0")
+            .max(100, "Split percentage cannot exceed 100"),
+        })
+      )
+      .min(2, "A transaction split requires at least two users")
+      .max(10, "A transaction can be split between at most 10 users"),
+  })
+  .superRefine(({ splits }, ctx) => {
+    const seen = new Set<string>();
+    for (const split of splits) {
+      if (seen.has(split.userId)) {
+        ctx.addIssue({
+          code: "custom",
+          message: "Each user can only appear once in a transaction split",
+          path: ["splits"],
+        });
+        return;
+      }
+      seen.add(split.userId);
+    }
+
+    const total = splits.reduce((sum, split) => sum + split.percentage, 0);
+    if (Math.abs(total - 100) > 0.01) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Split percentages must add up to 100",
+        path: ["splits"],
+      });
+    }
+  });
+
+export type TransactionSplitInput = z.infer<typeof TransactionSplitSchema>;
+
 // ────────────────────────────────────────────────────────────────
 // User Registration
 // ────────────────────────────────────────────────────────────────

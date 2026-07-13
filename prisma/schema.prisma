@@ -21,17 +21,18 @@ enum Role {
 // ────────────────────────────────────────────────────────────────
 
 model User {
-  id            String       @id @default(cuid())
-  name          String
-  email         String       @unique
-  emailVerified Boolean      @default(false)
-  image         String?
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
-  sessions      Session[]
-  accounts      Account[]
-  memberships   Membership[]
-  auditLogs     AuditLog[]
+  id                String             @id @default(cuid())
+  name              String
+  email             String             @unique
+  emailVerified     Boolean            @default(false)
+  image             String?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+  sessions          Session[]
+  accounts          Account[]
+  memberships       Membership[]
+  auditLogs         AuditLog[]
+  transactionSplits TransactionSplit[]
 }
 
 model Session {
@@ -107,17 +108,18 @@ model Membership {
 // ────────────────────────────────────────────────────────────────
 
 model Transaction {
-  id             String       @id @default(cuid())
+  id             String             @id @default(cuid())
   organizationId String
-  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  organization   Organization       @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   date           DateTime
   description    String
-  amount         Decimal      @db.Decimal(12, 2) // Exact decimal arithmetic for financial data
+  amount         Decimal            @db.Decimal(12, 2) // Exact decimal arithmetic for financial data
   category       String
   rawText        String
-  createdAt      DateTime     @default(now())
-  updatedAt      DateTime     @updatedAt
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
   parseResult    ParseResult?
+  splits         TransactionSplit[]
 
   @@index([organizationId])
   @@index([organizationId, createdAt])
@@ -151,9 +153,24 @@ model AuditLog {
   organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   userId         String
   user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
-  eventName      String       // e.g. "Workspace Created", "Transaction Parsed"
-  details        String?      // JSON or text details
+  eventName      String // e.g. "Workspace Created", "Transaction Parsed"
+  details        String? // JSON or text details
   timestamp      DateTime     @default(now())
 
   @@index([organizationId])
+}
+
+model TransactionSplit {
+  id            String      @id @default(cuid())
+  transactionId String
+  transaction   Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  percentage    Decimal     @db.Decimal(5, 2)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
+
+  @@unique([transactionId, userId])
+  @@index([transactionId])
+  @@index([userId])
 }
