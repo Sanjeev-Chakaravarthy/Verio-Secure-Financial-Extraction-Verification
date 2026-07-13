@@ -31,7 +31,6 @@ yarn-error.log*
 .pnpm-debug.log*
 
 # env files (can opt-in for committing if needed)
-.env*
 
 # vercel
 .vercel
@@ -51,3 +50,4 @@ vite.config.ts
 # Old app backup
 old-remix-app/
 next-env.d.ts
+config.bat

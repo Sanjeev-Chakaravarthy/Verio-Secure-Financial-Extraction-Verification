@@ -26,6 +26,21 @@ export interface ParseResult {
   updatedAt: string;
 }
 
+/** Percentage allocation of a transaction to a workspace user. */
+export interface TransactionSplit {
+  id: string;
+  transactionId: string;
+  userId: string;
+  percentage: number;
+  createdAt: string;
+  updatedAt: string;
+  user: {
+    id: string;
+    name: string;
+    email: string;
+  };
+}
+
 /** A financial transaction record scoped to an organization. */
 export interface Transaction {
   id: string;
@@ -38,6 +53,7 @@ export interface Transaction {
   createdAt: string;
   updatedAt: string;
   parseResult?: ParseResult | null;
+  splits?: TransactionSplit[];
 }
 
 /** Workspace membership joined with user details. */
