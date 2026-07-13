@@ -1,15 +1,28 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { authClient } from "@/utils/auth-client";
+
+interface TransactionSplit {
+  id: string;
+  userId: string;
+  percentage: number | string;
+  user: {
+    id: string;
+    name: string;
+    email: string;
+  };
+}
 
 interface Transaction {
   id: string;
   date: string;
   description: string;
-  amount: number;
+  amount: number | string;
   category: string;
   rawText: string;
+  splits?: TransactionSplit[];
   parseResult?: {
     merchantMatch: boolean;
     amountMatch: boolean;
@@ -23,6 +36,31 @@ interface ParseResultAnalysisViewProps {
   transaction: Transaction;
   onBack: () => void;
   backText?: string;
+}
+
+interface WorkspaceMember {
+  id: string;
+  user: {
+    id: string;
+    name: string;
+    email: string;
+  };
+}
+
+interface SplitDraft {
+  userId: string;
+  percentage: string;
+}
+
+async function readJsonResponse(res: Response) {
+  const text = await res.text();
+  if (!text) return {};
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { error: text };
+  }
 }
 
 // Derive per-dimension confidence percentages from the boolean parse result
@@ -64,6 +102,69 @@ export default function ParseResultAnalysisView({
 }: ParseResultAnalysisViewProps) {
   const [flagged, setFlagged] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [members, setMembers] = useState<WorkspaceMember[]>([]);
+  const [splitDrafts, setSplitDrafts] = useState<SplitDraft[]>([]);
+  const [savedSplits, setSavedSplits] = useState<TransactionSplit[]>(transaction.splits ?? []);
+  const [splitLoading, setSplitLoading] = useState(true);
+  const [splitSaving, setSplitSaving] = useState(false);
+
+  useEffect(() => {
+    let ignore = false;
+
+    const loadSplitContext = async () => {
+      setSplitLoading(true);
+      const existingSplits = transaction.splits ?? [];
+      setSavedSplits(existingSplits);
+
+      try {
+        const [membersRes, sessionRes] = await Promise.all([
+          fetch("/api/workspace/members"),
+          authClient.getSession(),
+        ]);
+        const membersData = await readJsonResponse(membersRes);
+        if (!membersRes.ok) {
+          throw new Error(membersData.error || `Failed to load members (${membersRes.status})`);
+        }
+        if (ignore) return;
+
+        const workspaceMembers: WorkspaceMember[] = membersData.members ?? [];
+        setMembers(workspaceMembers);
+
+        if (existingSplits.length > 0) {
+          setSplitDrafts(
+            existingSplits.map((split) => ({
+              userId: split.user?.id ?? split.userId,
+              percentage: String(Number(split.percentage)),
+            }))
+          );
+          return;
+        }
+
+        const currentUserId = sessionRes.data?.user?.id;
+        const currentMember = workspaceMembers.find((member) => member.user.id === currentUserId);
+        const otherMember = workspaceMembers.find((member) => member.user.id !== currentUserId);
+
+        if (currentMember && otherMember) {
+          setSplitDrafts([
+            { userId: currentMember.user.id, percentage: "50" },
+            { userId: otherMember.user.id, percentage: "50" },
+          ]);
+        } else {
+          setSplitDrafts([]);
+        }
+      } catch (err) {
+        console.error("Error loading split context:", err);
+      } finally {
+        if (!ignore) setSplitLoading(false);
+      }
+    };
+
+    loadSplitContext();
+
+    return () => {
+      ignore = true;
+    };
+  }, [transaction.id, transaction.splits]);
 
   const handleSave = async () => {
     setSaved(true);
@@ -86,6 +187,13 @@ export default function ParseResultAnalysisView({
   const confidencePct = Math.round(parseResult.finalConfidenceScore * 100);
   const breakdown = deriveBreakdown(parseResult);
   const sourceContext = formatSourceContext(transaction.rawText || "No source data available.");
+  const transactionAmount = Number(transaction.amount);
+  const splitTotal = splitDrafts.reduce((sum, split) => sum + (Number(split.percentage) || 0), 0);
+  const canSaveSplits =
+    splitDrafts.length >= 2 &&
+    splitDrafts.every((split) => split.userId && Number(split.percentage) > 0) &&
+    Math.abs(splitTotal - 100) <= 0.01 &&
+    !splitSaving;
 
   const confidenceLabel =
     confidencePct >= 88 ? "High Confidence" :
@@ -102,6 +210,63 @@ export default function ParseResultAnalysisView({
   const dashOffset = CIRC * (1 - parseResult.finalConfidenceScore);
 
   const docId = transaction.id.slice(-6).toUpperCase();
+
+  const updateSplitDraft = (index: number, patch: Partial<SplitDraft>) => {
+    setSplitDrafts((current) =>
+      current.map((split, i) => (i === index ? { ...split, ...patch } : split))
+    );
+  };
+
+  const addSplitDraft = () => {
+    const usedUserIds = new Set(splitDrafts.map((split) => split.userId));
+    const availableMember = members.find((member) => !usedUserIds.has(member.user.id));
+    if (!availableMember) return;
+
+    const remaining = Math.max(1, Number((100 - splitTotal).toFixed(2)));
+    setSplitDrafts((current) => [
+      ...current,
+      { userId: availableMember.user.id, percentage: String(remaining) },
+    ]);
+  };
+
+  const removeSplitDraft = (index: number) => {
+    setSplitDrafts((current) => current.filter((_, i) => i !== index));
+  };
+
+  const saveSplits = async () => {
+    setSplitSaving(true);
+    try {
+      const res = await fetch(`/api/transactions/${transaction.id}/splits`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          splits: splitDrafts.map((split) => ({
+            userId: split.userId,
+            percentage: Number(split.percentage),
+          })),
+        }),
+      });
+      const data = await readJsonResponse(res);
+      if (!res.ok || data.error) {
+        toast.error(data.error || "Failed to save split allocation.");
+        return;
+      }
+
+      setSavedSplits(data.splits ?? []);
+      setSplitDrafts(
+        (data.splits ?? []).map((split: TransactionSplit) => ({
+          userId: split.user?.id ?? split.userId,
+          percentage: String(Number(split.percentage)),
+        }))
+      );
+      toast.success("Transaction split saved.");
+    } catch (err) {
+      console.error("Error saving transaction split:", err);
+      toast.error("Network error while saving split allocation.");
+    } finally {
+      setSplitSaving(false);
+    }
+  };
 
   return (
     <div className="flex-1 flex flex-col min-h-screen">
@@ -199,7 +364,7 @@ export default function ParseResultAnalysisView({
                         Amount Detected
                       </p>
                       <p className="font-mono text-[14px] text-primary">
-                        {transaction.amount > 0 ? "+" : ""}₹{Math.abs(transaction.amount).toFixed(2)}
+                        {transactionAmount > 0 ? "+" : ""}₹{Math.abs(transactionAmount).toFixed(2)}
                       </p>
                     </div>
                     <div>
@@ -227,6 +392,133 @@ export default function ParseResultAnalysisView({
                   <pre className="font-mono text-[12px] text-primary bg-surface-container-low border border-outline-variant p-lg leading-relaxed overflow-x-auto whitespace-pre-wrap custom-scrollbar select-all">
                     {sourceContext}
                   </pre>
+                </div>
+              </div>
+
+              {/* Split Allocation */}
+              <div className="hairline-border bg-white">
+                <div className="flex items-center justify-between px-lg py-md border-b border-outline-variant">
+                  <span className="font-sans text-label-sm text-[11px] text-on-surface-variant uppercase tracking-widest font-semibold">
+                    Split Allocation
+                  </span>
+                  <span
+                    className={`font-mono text-[12px] ${
+                      Math.abs(splitTotal - 100) <= 0.01 ? "text-primary" : "text-error"
+                    }`}
+                  >
+                    {splitTotal.toFixed(2)}%
+                  </span>
+                </div>
+
+                <div className="px-lg py-xl space-y-lg">
+                  {splitLoading ? (
+                    <div className="py-md text-center font-sans text-body-md text-on-surface-variant">
+                      Loading workspace members...
+                    </div>
+                  ) : members.length < 2 ? (
+                    <div className="py-md text-center font-sans text-body-md text-on-surface-variant">
+                      Add another workspace member before splitting this transaction.
+                    </div>
+                  ) : (
+                    <>
+                      <div className="space-y-sm">
+                        {splitDrafts.map((split, index) => {
+                          const splitUserIds = new Set(splitDrafts.map((draft, i) => (i === index ? "" : draft.userId)));
+                          const splitAmount = transactionAmount * ((Number(split.percentage) || 0) / 100);
+
+                          return (
+                            <div
+                              key={`${split.userId}-${index}`}
+                              className="grid grid-cols-12 gap-sm items-center border border-outline-variant bg-surface-container-low px-sm py-sm"
+                            >
+                              <select
+                                value={split.userId}
+                                onChange={(e) => updateSplitDraft(index, { userId: e.target.value })}
+                                className="col-span-12 md:col-span-5 bg-white border border-outline-variant pl-sm pr-20 py-sm font-sans text-[13px] text-primary focus:outline-none rounded-none appearance-none bg-[url('data:image/svg+xml;charset=UTF-8,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%2212%22%20height%3D%2212%22%20viewBox%3D%220%200%2012%2012%22%3E%3Cpath%20fill%3D%22%23555%22%20d%3D%22M2%204l4%204%204-4%22%2F%3E%3C%2Fsvg%3E')] bg-[length:12px] bg-[right_32px_center] bg-no-repeat"
+                              >
+                                {members.map((member) => (
+                                  <option
+                                    key={member.id}
+                                    value={member.user.id}
+                                    disabled={splitUserIds.has(member.user.id)}
+                                  >
+                                    {member.user.name}
+                                  </option>
+                                ))}
+                              </select>
+
+                              <div className="col-span-7 md:col-span-3 flex items-center bg-white border border-outline-variant">
+                                <input
+                                  type="number"
+                                  min="0.01"
+                                  max="100"
+                                  step="0.01"
+                                  value={split.percentage}
+                                  onChange={(e) => updateSplitDraft(index, { percentage: e.target.value })}
+                                  className="w-full bg-transparent px-sm py-sm font-mono text-[13px] text-primary border-none"
+                                />
+                                <span className="pr-sm font-mono text-[12px] text-on-surface-variant">%</span>
+                              </div>
+
+                              <div className="col-span-4 md:col-span-3 font-mono text-[12px] text-right text-on-surface-variant">
+                                ₹{Math.abs(splitAmount).toFixed(2)}
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() => removeSplitDraft(index)}
+                                disabled={splitDrafts.length <= 2}
+                                className="col-span-1 flex justify-end text-on-surface-variant hover:text-error disabled:opacity-30 disabled:hover:text-on-surface-variant"
+                                aria-label="Remove split row"
+                              >
+                                <span className="material-symbols-outlined text-[18px]">close</span>
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {savedSplits.length > 0 && (
+                        <div className="border-t border-outline-variant pt-md">
+                          <p className="font-sans text-label-sm text-[10px] text-on-surface-variant uppercase tracking-widest mb-sm font-semibold">
+                            Saved Split
+                          </p>
+                          <div className="space-y-xs">
+                            {savedSplits.map((split) => (
+                              <div
+                                key={split.id}
+                                className="flex items-center justify-between font-sans text-[13px] text-primary"
+                              >
+                                <span>{split.user.name}</span>
+                                <span className="font-mono text-on-surface-variant">
+                                  {Number(split.percentage).toFixed(2)}%
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-between gap-md border-t border-outline-variant pt-md">
+                        <button
+                          type="button"
+                          onClick={addSplitDraft}
+                          disabled={splitDrafts.length >= members.length}
+                          className="font-sans text-label-sm text-[12px] uppercase tracking-widest text-primary underline underline-offset-4 disabled:opacity-40"
+                        >
+                          Add Member
+                        </button>
+                        <button
+                          type="button"
+                          onClick={saveSplits}
+                          disabled={!canSaveSplits}
+                          className="bg-primary text-on-primary border border-primary font-sans text-label-sm text-[12px] uppercase tracking-widest px-lg py-sm hover:opacity-90 disabled:opacity-50 rounded-none"
+                        >
+                          {splitSaving ? "Saving..." : "Save Split"}
+                        </button>
+                      </div>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
