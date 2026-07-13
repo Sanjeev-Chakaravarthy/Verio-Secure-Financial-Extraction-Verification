@@ -11,11 +11,16 @@ interface Transaction {
   id: string;
   date: string;
   description: string;
-  amount: number;
+  amount: number | string;
   category: string;
   parseResult?: {
-    finalConfidenceScore: number;
+    finalConfidenceScore: number | string;
   };
+}
+
+function toFiniteNumber(value: number | string | undefined, fallback = 0) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : fallback;
 }
 
 export default function Transactions() {
@@ -76,10 +81,12 @@ export default function Transactions() {
   // Compute a running balance starting from an arbitrary ledger base
   let runningBalance = 17651.50;
   const transactionRows = [...transactions].reverse().map((t) => {
-    runningBalance += t.amount;
-    const finalConfidenceScore = t.parseResult?.finalConfidenceScore ?? 0.65;
+    const amount = toFiniteNumber(t.amount);
+    runningBalance += amount;
+    const finalConfidenceScore = toFiniteNumber(t.parseResult?.finalConfidenceScore, 0.65);
     return {
       ...t,
+      amount,
       balance: runningBalance,
       finalConfidenceScore,
     };
