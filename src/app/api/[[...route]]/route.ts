@@ -7,6 +7,7 @@ import { sendInviteEmail } from "@/utils/email";
 import { parseRawTransactionText } from "@/utils/parser";
 import {
   ParseTransactionSchema,
+  TransactionSplitSchema,
   RegisterSchema,
   InviteSchema,
   UpdateRoleSchema,
@@ -83,6 +84,65 @@ async function getSessionContext(headers: Headers, cookieHeader?: string | null)
 function parseCookieValue(cookieHeader: string, name: string): string | null {
   const match = cookieHeader.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
   return match ? decodeURIComponent(match[1]) : null;
+}
+
+type DecimalSerializable = number | string | { toNumber?: () => number; toString: () => string };
+
+type ParseResultWithDecimals = {
+  amount: DecimalSerializable;
+  finalConfidenceScore: DecimalSerializable;
+  [key: string]: unknown;
+};
+
+type SplitWithDecimals = {
+  percentage: DecimalSerializable;
+  [key: string]: unknown;
+};
+
+type TransactionWithDecimals = {
+  amount: DecimalSerializable;
+  parseResult?: ParseResultWithDecimals | null;
+  splits?: SplitWithDecimals[];
+  [key: string]: unknown;
+};
+
+function decimalToNumber(value: DecimalSerializable): number {
+  const numeric =
+    typeof value === "number"
+      ? value
+      : typeof value === "object" && typeof value.toNumber === "function"
+        ? value.toNumber()
+        : Number(value);
+
+  return Number.isFinite(numeric) ? numeric : 0;
+}
+
+function serializeParseResult(parseResult?: ParseResultWithDecimals | null) {
+  if (!parseResult) {
+    return parseResult;
+  }
+
+  return {
+    ...parseResult,
+    amount: decimalToNumber(parseResult.amount),
+    finalConfidenceScore: decimalToNumber(parseResult.finalConfidenceScore),
+  };
+}
+
+function serializeSplits(splits?: SplitWithDecimals[]) {
+  return splits?.map((split) => ({
+    ...split,
+    percentage: decimalToNumber(split.percentage),
+  }));
+}
+
+function serializeTransaction<T extends TransactionWithDecimals>(transaction: T) {
+  return {
+    ...transaction,
+    amount: decimalToNumber(transaction.amount),
+    parseResult: serializeParseResult(transaction.parseResult),
+    splits: serializeSplits(transaction.splits),
+  };
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -239,7 +299,12 @@ app.post("/transactions/parse", async (c) => {
     },
   });
 
-  return c.json({ transaction: { ...result.transaction, parseResult: result.parseResult } });
+  return c.json({
+    transaction: serializeTransaction({
+      ...result.transaction,
+      parseResult: result.parseResult,
+    }),
+  });
 });
 
 // ────────────────────────────────────────────────────────────────
@@ -280,6 +345,18 @@ app.get("/transactions", async (c) => {
     },
     include: {
       parseResult: true,
+      splits: {
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "asc" },
+      },
     },
     take: limit + 1,
     cursor: cursor ? { id: cursor } : undefined,
@@ -293,7 +370,7 @@ app.get("/transactions", async (c) => {
     nextCursor = nextItem!.id;
   }
 
-  return c.json({ transactions, nextCursor });
+  return c.json({ transactions: transactions.map(serializeTransaction), nextCursor });
 });
 
 /**
@@ -316,6 +393,18 @@ app.get("/transactions/:id", async (c) => {
     },
     include: {
       parseResult: true,
+      splits: {
+        include: {
+          user: {
+            select: {
+              id: true,
+              name: true,
+              email: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "asc" },
+      },
     },
   });
 
@@ -323,7 +412,117 @@ app.get("/transactions/:id", async (c) => {
     return c.json({ error: "Transaction not found" }, 404);
   }
 
-  return c.json({ transaction });
+  return c.json({ transaction: serializeTransaction(transaction) });
+});
+
+/**
+ * PUT /api/transactions/:id/splits
+ *
+ * Replaces the split allocation for a transaction. Both the transaction
+ * and every selected user must belong to the authenticated workspace.
+ *
+ * Request body validated by {@link TransactionSplitSchema}.
+ */
+app.put("/transactions/:id/splits", async (c) => {
+  const context = await getSessionContext(c.req.raw.headers, c.req.raw.headers.get("cookie"));
+  if (!context) {
+    return c.json({ error: "Unauthorized" }, 401);
+  }
+
+  const id = c.req.param("id");
+  const body = await c.req.json();
+  const parsed = TransactionSplitSchema.safeParse(body);
+  if (!parsed.success) {
+    return c.json({ error: parsed.error.issues[0].message }, 400);
+  }
+
+  const requestedUserIds = parsed.data.splits.map((split) => split.userId);
+
+  const result = await prisma.$transaction(async (tx) => {
+    const transaction = await tx.transaction.findFirst({
+      where: {
+        id,
+        organizationId: context.organizationId,
+      },
+      select: {
+        id: true,
+        description: true,
+      },
+    });
+
+    if (!transaction) {
+      return {
+        status: 404,
+        body: { error: "Transaction not found" },
+      };
+    }
+
+    const memberships = await tx.membership.findMany({
+      where: {
+        organizationId: context.organizationId,
+        userId: { in: requestedUserIds },
+      },
+      select: {
+        userId: true,
+      },
+    });
+
+    if (memberships.length !== requestedUserIds.length) {
+      return {
+        status: 400,
+        body: { error: "All split users must belong to the active workspace" },
+      };
+    }
+
+    await tx.transactionSplit.deleteMany({
+      where: { transactionId: transaction.id },
+    });
+
+    await tx.transactionSplit.createMany({
+      data: parsed.data.splits.map((split) => ({
+        transactionId: transaction.id,
+        userId: split.userId,
+        percentage: split.percentage,
+      })),
+    });
+
+    const splits = await tx.transactionSplit.findMany({
+      where: { transactionId: transaction.id },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            email: true,
+          },
+        },
+      },
+      orderBy: { createdAt: "asc" },
+    });
+
+    await tx.auditLog.create({
+      data: {
+        organizationId: context.organizationId,
+        userId: context.userId,
+        eventName: "Transaction Split Updated",
+        details: `${transaction.description} split across ${splits.length} members`,
+      },
+    });
+
+    return {
+      status: 200,
+      body: { success: true, splits: serializeSplits(splits) },
+    };
+  });
+
+  if (result.status === 200) {
+    return c.json(result.body);
+  }
+  if (result.status === 404) {
+    return c.json(result.body, 404);
+  }
+
+  return c.json(result.body, 400);
 });
 
 // ────────────────────────────────────────────────────────────────

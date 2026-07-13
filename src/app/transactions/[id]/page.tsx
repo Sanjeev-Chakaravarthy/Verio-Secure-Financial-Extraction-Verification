@@ -37,7 +37,22 @@ export default function ParseResultAnalysis({ params }: { params: Promise<{ id: 
         router.push("/login");
       } else {
         fetch(`/api/transactions/${id}`)
-          .then((res) => res.json())
+          .then(async (res) => {
+            const text = await res.text();
+            const data = text
+              ? (() => {
+                  try {
+                    return JSON.parse(text);
+                  } catch {
+                    return { error: text };
+                  }
+                })()
+              : {};
+            if (!res.ok) {
+              throw new Error(data.error || `Failed to load transaction (${res.status})`);
+            }
+            return data;
+          })
           .then((data) => {
             if (data.transaction) {
               setTransaction(data.transaction);
